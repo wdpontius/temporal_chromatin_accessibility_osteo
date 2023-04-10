@@ -1,0 +1,188 @@
+/opt/biotools/R-4.0.0/bin/R
+
+library(Seurat)
+library(Signac)
+library(EnsDb.Hsapiens.v86)
+library(dplyr)
+library(ggplot2)
+
+
+#/mnt/pan/SOM_GEN_PXS183/esh81/cellranger/MG63_3/outs/filtered_peak_bc_matrix.h5
+
+
+counts <- Read10X_h5(filename = "/mnt/pan/SOM_GEN_PXS183/esh81/cellranger/MG63_3/outs/filtered_peak_bc_matrix.h5")
+metadata <- read.csv(
+  file = "/mnt/pan/SOM_GEN_PXS183/esh81/cellranger/MG63_3/outs/singlecell.csv",
+  header = TRUE,
+  row.names = 1
+)
+
+chrom_assay <- CreateChromatinAssay(
+  counts = counts,
+  sep = c(":", "-"),
+  genome = 'hg19',
+  fragments = '/mnt/pan/SOM_GEN_PXS183/esh81/cellranger/MG63_3/outs/fragments.tsv.gz',
+  min.cells = 10,
+  min.features = 200
+)
+
+mg63_3 <- CreateSeuratObject(
+  counts = chrom_assay,
+  assay = "peaks",
+  meta.data = metadata
+)
+
+
+annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Hsapiens.v86)
+seqlevelsStyle(annotations) <- 'UCSC'
+genome(annotations) <- "hg19"
+Annotation(mg63_3) <- annotations
+
+
+###qc###
+mg63_3 <- NucleosomeSignal(object = mg63_3)
+mg63_3 <- TSSEnrichment(object = mg63_3, fast = FALSE)
+mg63_3$pct_reads_in_peaks <- mg63_3$peak_region_fragments / mg63_3$passed_filters * 100
+mg63_3$blacklist_ratio <- mg63_3$blacklist_region_fragments / mg63_3$peak_region_fragments
+
+mg63_3$high.tss <- ifelse(mg63_3$TSS.enrichment > 2, 'High', 'Low')
+TSSPlot(mg63_3, group.by = 'high.tss') + NoLegend()
+ggsave("210610_MG63_3_TSS_enrichment.pdf")
+
+mg63_3$nucleosome_group <- ifelse(mg63_3$nucleosome_signal > 4, 'NS > 4', 'NS < 4')
+FragmentHistogram(object = mg63_3, group.by = 'nucleosome_group')
+ggsave("210610_MG63_3_fragmenthistogram.pdf")
+
+VlnPlot(
+  object = mg63_3,
+  features = c('pct_reads_in_peaks', 'peak_region_fragments',
+               'TSS.enrichment', 'blacklist_ratio', 'nucleosome_signal'),
+  pt.size = 0.1,
+  ncol = 5
+)
+ggsave("210610_MG63_3_vlnplot_qc.pdf")
+
+mg63_3 <- RunTFIDF(mg63_3)
+mg63_3 <- FindTopFeatures(mg63_3, min.cutoff = 'q0')
+mg63_3 <- RunSVD(mg63_3)
+
+DepthCor(mg63_3)
+ggsave("210613_mg63_3_depthcor_no_qc_filter.pdf")
+
+##non-linear dimension reduction and clustering##
+mg63_3 <- RunUMAP(object = mg63_3, reduction = 'lsi', dims = 2:30)
+mg63_3 <- FindNeighbors(object = mg63_3, reduction = 'lsi', dims = 2:30)
+mg63_3 <- FindClusters(object = mg63_3, verbose = FALSE, algorithm = 3)
+DimPlot(object = mg63_3, label = FALSE)
+ggsave("210610_mg63_3_dimplot_0439PM.pdf")
+
+
+
+DefaultAssay(mg63_3) <- 'peaks'
+granges(mg63_3) -> gr_mg63_3
+write.table(as.data.frame(gr_mg63_3), file="mg63_3_peaks_granges_220426.bed", 
+            quote=FALSE, row.names=FALSE, col.names=TRUE, sep="\t", na="")
+
+
+vim promoters_marker_genes_220426.csv
+#chr16,3114312,3116312,IL32
+#chr10,104152866,104154866,NFKB2
+#chr19,45503706,45505706,RELB
+#chr7,19156295,19158295,TWIST1
+#chr17,70116160,70118160,SOX9
+#chr16,55512080,55514080,MMP2
+#chr9,110251047,110253047,KLF4
+cat promoters_marker_genes_220426.csv | awk 'BEGIN {FS=","}{OFS="\t"}{print $1,$2,$3,$4}' > promoters_marker_genes_220426.bed
+sed '1d' mg63_3_peaks_granges_220426.bed > no_header_mg63_3_peaks_granges_220426.bed
+bedtools intersect -a promoters_marker_genes_220426.bed -b no_header_mg63_3_peaks_granges_220426.bed -wa -wb > intersect_prom_marker_genes_peaks_220426.bed
+
+
+
+library(Seurat)
+library(Signac)
+library(EnsDb.Hsapiens.v86)
+library(dplyr)
+library(ggplot2)
+library(JASPAR2020)
+library(motifmatchr)
+library(BSgenome.Hsapiens.UCSC.hg19)
+library(TFBSTools)
+pwm_set <- getMatrixSet(x = JASPAR2020, opts = list(species = 9606, all_versions = FALSE))
+library(chromVAR)
+
+mg63_3 <- AddMotifs(
+  object = mg63_3,
+  genome = BSgenome.Hsapiens.UCSC.hg19,
+  pfm = pwm_set
+)
+
+mg63_3 <- RunChromVAR(
+  object = mg63_3,
+  genome = BSgenome.Hsapiens.UCSC.hg19
+)
+
+DefaultAssay(mg63_3) <- 'chromvar'
+
+##umap without showing any colors##
+DimPlot(mg63_3, group.by="orig.ident", cols="gray", pt.size=1)
+ggsave("mg63_3_umap_gray_only_0226PM_220502.png", type="cairo")
+
+
+
+library(patchwork) 
+
+nfkb2_prom <-FeaturePlot(
+  object = mg63_3,
+  features = "chr10-104153513-104156012",
+  min.cutoff='q10',
+  max.cutoff='q90',
+  pt.size = 0.1, 
+  cols=c("gray94", "#CA2027")  
+) + ggtitle("NFKB2")
+
+relb_prom<-FeaturePlot(
+  object = mg63_3,
+  features = "chr19-45504140-45506004",
+  min.cutoff='q10',
+  max.cutoff='q90',
+  pt.size = 0.1,
+  cols=c("gray94", "#CA2027")
+) + ggtitle("RELB")
+
+twist1_prom<-FeaturePlot(
+  object = mg63_3,
+  features = "chr7-19155514-19157488",
+  min.cutoff='q10',
+  max.cutoff='q90',
+  pt.size = 0.1,
+  cols=c("gray94", "#283046")
+) + ggtitle("TWIST1")
+
+sox9_prom<-FeaturePlot(
+  object = mg63_3,
+  features = "chr17-70116142-70118621",
+  min.cutoff='q10',
+  max.cutoff='q90',
+  pt.size = 0.1,
+  cols=c("gray94", "#283046")
+) + ggtitle("SOX9")
+
+
+klf4_prom <- FeaturePlot(
+  object = mg63_3,
+  min.cutoff='q10',
+  max.cutoff='q90',
+  features = "chr9-110248999-110253038",
+  pt.size = 0.1,
+  cols=c("gray94", "#4CAADF")
+) + ggtitle("KLF4") 
+
+
+nfkb2_c <- FeaturePlot(mg63_3, features="MA0778.1", min.cutoff='q10', max.cutoff='q90', pt.size=0.1, cols=c("gray94", "#CA2027")) + theme(plot.title = element_blank())
+klf4_2_c <- FeaturePlot(mg63_3, features="MA0039.4", min.cutoff='q10', max.cutoff='q90', pt.size=0.1, cols=c("gray94", "#4CAADF")) + theme(plot.title = element_blank())
+twist1_2_c <- FeaturePlot(mg63_3, features="MA1123.2", min.cutoff='q10', max.cutoff='q90', pt.size=0.1, cols=c("gray94", "#283046")) + theme(plot.title = element_blank())
+relb_c <- FeaturePlot(mg63_3, features="MA1117.1", min.cutoff='q10', max.cutoff='q90', pt.size=0.1, cols=c("gray94", "#CA2027"))+ theme(plot.title = element_blank())
+sox9_c <- FeaturePlot(mg63_3, features="MA0077.1", min.cutoff='q10', max.cutoff='q90', pt.size=0.1, cols=c("gray94", "#283046"))+ theme(plot.title = element_blank())
+(nfkb2_prom | relb_prom  | klf4_prom | twist1_prom | sox9_prom)/(nfkb2_c | relb_c | klf4_2_c | twist1_2_c | sox9_c)
+ggsave("wdp_plot_4PM_220512.png", type="cairo", height=6, width=18) 
+
