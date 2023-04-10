@@ -1,0 +1,53 @@
+#perform alignment and make bigwig using deeptools
+for file in 63_25k_lib_S5 63_50k_lib_S6 63_100k_lib_S4 63-3_50k_lib_S3 63-3_25k_lib_S2; do
+bwa mem -t 4 /mnt/rds/genetics01/ScacheriLab/ars51/genomes/hg19/hg19.fa $file_R1.fastq.gz $file_R2.fastq.gz | samtools sort -@ 4 -O bam -T $file.tmp -o $file.bam -
+samtools index $file.bam
+bamCoverage -b $file.bam -o $file_nodup_normed.bw --ignoreDuplicates --normalizeTo1x 2451960000
+done
+
+samtools sort -n 63-3_100k.bam -o 63-3_100k_sorted-for-peaks.bam; ~/programs/Genrich/Genrich -t 63-3_100k_sorted-for-peaks.bam -o 63-3_100k_nodups_unpaired.narrowPeak -j -y -r -e chrM
+
+bwa mem -t 4 /mnt/rds/genetics01/ScacheriLab/ars51/genomes/hg19/hg19.fa 63_100k_lib_S4_R1.fastq.gz 63_100k_lib_S4_R2.fastq.gz | samtools sort -@ 4 -O bam -T 63_100k_lib_S4.tmp -o 63_100k_lib_S4.bam -
+samtools index 63_100k_lib_S4.bam
+bamCoverage -b 63_100k_lib_S4.bam -o 63_100k_lib_S4_nodup_normed.bw --ignoreDuplicates --normalizeTo1x 2451960000
+
+#call peaks using genrich
+for file in 63_25k_lib_S5 63_50k_lib_S6 63-3_50k_lib_S3 63-3_25k_lib_S2; do
+samtools sort -n $file.bam -o "$file"_sorted-for-peaks.bam
+~/programs/Genrich/Genrich -t "$file"_sorted-for-peaks.bam -o "$file"_nodups_unpaired.narrowPeak -j -r -e chrM
+done
+
+#find motifs 200bp from atacseq peak, keeping active promoters
+findMotifsGenome.pl 63-3_100k_nodups_unpaired.narrowPeak ~/hg19/hg19.fa 63-3_100k_with-promoters
+
+#find motifs 200bp from atacseq peak, but remove active promoters
+intersectBed -v -a 63-3_100k_nodups_unpaired.narrowPeak -b ~/known_genes_2kb.bed > 63-3_100k_nodups_unpaired_no-prom.narrowPeak
+findMotifsGenome.pl 63-3_100k_nodups_unpaired_no-prom.narrowPeak ~/hg19/hg19.fa 63-3_100k_no-promoters
+
+for file in 63_100k_lib_S4.bam; do
+samtools sort -n $file.bam -o "$file"_sorted-for-peaks.bam
+~/programs/Genrich/Genrich -t "$file"_sorted-for-peaks.bam -o "$file"_nodups_unpaired.narrowPeak -j -r -e chrM
+done
+
+####QC
+for file in `ls | grep .bam | egrep -v '.bai|sorted'`; do
+file2=${file%.*}
+echo sample metric value >> qc.txt
+echo $file2 raw_reads $((`zcat "$file2"_R1.fastq.gz | wc -l`/4)) >> qc.txt
+echo $file2 mapped_reads `samtools view -c -F 4 "$file2".bam` >> qc.txt
+echo $file2 no_dup_reads `samtools rmdup "$file2".bam - | samtools view -c -f -` >> qc.txt
+done
+
+Rscript reformat_qc.R
+
+#!/bin/Rscript
+
+library(readr)
+library(tidyr)
+
+qc_df <- read_delim("qc.txt", delim = " ")
+
+qc_df_wide <- spread(qc_df, metric, value)
+
+write_excel_csv(qc_df_wide, "qc_reformat.csv")
+

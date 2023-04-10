@@ -1,0 +1,110 @@
+#perform alignment to human (hg19)
+for file in in-vivo_d1_1_S1 in-vivo_d1_2_S2 in-vivo_d1_3_S3 in-vivo_d22_1_S4 in-vivo_d22_2_S5 in-vivo_d22_3_S6 in-vivo_d22_4_S7 in-vivo_d22_5_S8; do
+bwa mem -t 4 /mnt/rds/genetics01/ScacheriLab/ars51/genomes/hg19/hg19.fa "$file"_R1.fastq.gz "$file"_R2.fastq.gz | samtools sort -@ 4 -O bam -T "$file".tmp -o "$file".bam -
+samtools index "$file".bam
+bamCoverage -b "$file".bam -o "$file"_nodup_normed.bw --ignoreDuplicates --normalizeTo1x 2451960000
+done
+
+#call peaks
+for file in in-vivo_d1_1_S1 in-vivo_d1_2_S2 in-vivo_d1_3_S3 in-vivo_d22_1_S4 in-vivo_d22_2_S5 in-vivo_d22_3_S6 in-vivo_d22_4_S7 in-vivo_d22_5_S8; do
+samtools sort -n "$file".bam -o "$file"_sorted-for-peaks.bam
+~/programs/Genrich/Genrich -t "$file"_sorted-for-peaks.bam -o "$file"_nodups_unpaired.narrowPeak -j -r -e chrM
+done
+
+#subsample bams to look for mouse reads on igv
+for file in in-vivo_d1_1_S1 in-vivo_d1_2_S2 in-vivo_d1_3_S3 in-vivo_d22_1_S4 in-vivo_d22_2_S5 in-vivo_d22_3_S6 in-vivo_d22_4_S7 in-vivo_d22_5_S8; do
+samtools view -bs 42.05 "$file".bam > "$file"_5perc_subsampled.bam
+samtools sort "$file"_5perc_subsampled_sorted.bam
+rm "$file"_5perc_subsampled.bam
+samtools index "$file"_5perc_subsampled_sorted.bam
+done
+
+#accidentally overwrote the original hg19 bams with the following code, before changing the output name. Sorted are still okay though.
+
+#perform alignment to mouse (mm9) for XenofilteR
+species=mm9
+for file in in-vivo_d1_1_S1 in-vivo_d1_2_S2 in-vivo_d1_3_S3 in-vivo_d22_1_S4 in-vivo_d22_2_S5 in-vivo_d22_3_S6 in-vivo_d22_4_S7 in-vivo_d22_5_S8; do
+bwa mem -t 4 /mnt/rds/genetics01/ScacheriLab/ars51/genomes/mm9/mm9.fa "$file"_R1.fastq.gz "$file"_R2.fastq.gz | samtools sort -@ 4 -O bam -T "$file".tmp -o "$file"_"$species".bam -
+samtools index "$file"_"$species".bam
+done
+
+#did not initially work, giving error about wrong seq_length or something
+#ran this command 'bwa index mm9.fa && echo "OK. Done."' to remake the mm9 index, and will see if this helps.
+#People say this is a problem with using different version of BWA to do alignment and make genome index
+#yay it worked!!
+
+#use this loop to make the sample.list file for xenofilter
+for file in in-vivo_d1_1_S1 in-vivo_d1_2_S2 in-vivo_d1_3_S3 in-vivo_d22_1_S4 in-vivo_d22_2_S5 in-vivo_d22_3_S6 in-vivo_d22_4_S7 in-vivo_d22_5_S8; do
+echo "$file"_sorted-for-peaks.bam,"$file"_mm9.bam >> sample_list_xenofilter.csv
+done
+
+#needs to be sorted by chromosome, ugh why does this take so long
+
+for file in in-vivo_d1_2_S2 in-vivo_d1_3_S3 in-vivo_d22_1_S4 in-vivo_d22_2_S5 in-vivo_d22_3_S6 in-vivo_d22_4_S7 in-vivo_d22_5_S8; do
+samtools sort -m 5G "$file"_sorted-for-peaks.bam -o "$file"_sorted.bam
+done
+
+for file in in-vivo_d1_1_S1 in-vivo_d1_2_S2 in-vivo_d1_3_S3 in-vivo_d22_1_S4 in-vivo_d22_2_S5 in-vivo_d22_3_S6 in-vivo_d22_4_S7 in-vivo_d22_5_S8; do
+samtools sort -m 5G "$file"_mm9.bam -o "$file"_sorted_mm9.bam
+done
+
+#ran XenofilteR
+library(XenofilteR)
+
+sample.list <- read.csv("sample_list_xenofilter.csv", header = FALSE)
+bp.param <- SnowParam(workers = 4, type = "SOCK")
+XenofilteR(sample.list, destination.folder = "./", bp.param = bp.param)
+
+#make bigwigs from filtered bams
+for file in in-vivo_d1_1_S1 in-vivo_d1_2_S2 in-vivo_d1_3_S3 in-vivo_d22_1_S4 in-vivo_d22_2_S5 in-vivo_d22_3_S6 in-vivo_d22_4_S7 in-vivo_d22_5_S8; do
+bamCoverage -b "$file"_sorted_Filtered.bam -o "$file"_sorted_Filtered_nodup_normed.bw --ignoreDuplicates --normalizeTo1x 2451960000
+done
+
+#call peaks - genrich requires sorting bams by query name, so have to resort...ugh
+#sorting didn't take as long because bams are somewhat small after filtering
+for file in in-vivo_d1_1_S1 in-vivo_d1_2_S2 in-vivo_d1_3_S3 in-vivo_d22_1_S4 in-vivo_d22_2_S5 in-vivo_d22_3_S6 in-vivo_d22_4_S7 in-vivo_d22_5_S8; do
+samtools sort -n -m 20G "$file"_sorted_Filtered.bam -o "$file"_sorted-for-peaks_Filtered.bam
+~/programs/Genrich/Genrich -t "$file"_sorted-for-peaks_Filtered.bam -o "$file"_sorted_Filtered.narrowPeak -j -r -e chrM
+done
+
+#combine all 3 replicate in vitro peaks, and in vivo peaks (not the 95% mouse one)
+cat *.narrowPeak ../../peaks/63-3*.narrowPeak > 63-3_in-vitro_in-vivo-filtered_atac_peaks_catted.bed
+sortBed -i 63-3_in-vitro_in-vivo-filtered_atac_peaks_catted.bed | mergeBed -i stdin > 63-3_in-vitro_in-vivo-filtered_atac_peaks_universe.bed
+
+#calc rpkm
+for file in 63-3_100k 63-3_50k_lib_S3 63-3_25k_lib_S2; do
+perl ~/scripts/calc_rpkm.pl filtered_peaks/63-3_in-vitro_in-vivo-filtered_atac_peaks_universe.bed ../../"$file".bam "$file"
+done
+
+for file in in-vivo_d1_2_S2_sorted_Filtered in-vivo_d1_3_S3_sorted_Filtered in-vivo_d22_1_S4_sorted_Filtered in-vivo_d22_2_S5_sorted_Filtered in-vivo_d22_3_S6_sorted_Filtered in-vivo_d22_4_S7_sorted_Filtered in-vivo_d22_5_S8_sorted_Filtered; do
+perl ~/scripts/calc_rpkm.pl klf4_binding-sites.bed "$file".bam "$file"_klf4
+done
+
+##============================================HOMER THINGS====================================================#
+
+intersectBed -v -a ../peaks/63-3_100k_nodups_unpaired.narrowPeak -b early_peaks_fuzzy_unique.bed > 63-3_100k_nodups_unpaired_no-early.narrowPeak
+intersectBed -v -a ../peaks/63-3_100k_nodups_unpaired.narrowPeak -b late_peaks_fuzzy_unique.bed > 63-3_100k_nodups_unpaired_no-late.narrowPeak
+intersectBed -v -a ../peaks/63-3_100k_nodups_unpaired.narrowPeak -b invitro_peaks_fuzzy_unique.bed > 63-3_100k_nodups_unpaired_no-invitro.narrowPeak
+intersectBed -v -a ../peaks/63-3_100k_nodups_unpaired.narrowPeak -b up_over_time_peaks_fuzzy_unique.bed > 63-3_100k_nodups_unpaired_no-up-over-time.narrowPeak
+intersectBed -v -a ../peaks/63-3_100k_nodups_unpaired.narrowPeak -b invivo_peaks_fuzzy.bed > 63-3_100k_nodups_unpaired_no-invivo.narrowPeak
+intersectBed -v -a ../peaks/63-3_100k_nodups_unpaired.narrowPeak -b early_peaks_down_fuzzy.bed > 63-3_100k_nodups_unpaired_no-early-down.narrowPeak
+intersectBed -v -a ../peaks/63-3_100k_nodups_unpaired.narrowPeak -b stable_peaks_fuzzy_unique.bed > 63-3_100k_nodups_unpaired_no-stable.narrowPeak
+intersectBed -v -a ../peaks/63-3_100k_nodups_unpaired.narrowPeak -b closed_late_unique_fuzzy.bed > 63-3_100k_nodups_unpaired_no-closed-late.narrowPeak
+
+
+cat test.txt | while read -r line; do
+echo ">"`cut -f 1` >> test2.txt
+echo `cut -f 2` >> test2.txt
+done
+
+
+for file in `ls | grep .narrowPeak`; do
+name=`basename $file .narrowPeak`
+intersectBed -v -a $file -b ~/CHIP_SEQ_TRACKS/Anshul_Hg19UltraHighSignalArtifactRegions.bed > "$name"_no-blacklist.narrowPeak
+done
+
+
+#calc rpkm
+for file in 63-3_100k 63-3_50k_lib_S3 63-3_25k_lib_S2; do
+perl ~/scripts/calc_rpkm.pl  ../../"$file".bam "$file"
+done
